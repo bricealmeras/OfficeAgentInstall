@@ -1,0 +1,72 @@
+====================================================================
+CONTEXTE & ARCHITECTURE : OFFICE AGENT POUR ANTIGRAVITY
+====================================================================
+
+Ce fichier sert de "mémoire" ou de "Prompt de Contexte" à donner à 
+un agent Antigravity (IA) si vous souhaitez améliorer ou déboguer
+cette compétence (Skill) sur un autre PC.
+
+Si vous êtes l'IA Antigravity lisant ce fichier, voici tout ce que 
+vous devez savoir sur le fonctionnement de l'intégration Office :
+
+1. LE BUT DU PROJET
+-------------------
+Le but est de relier le complément Microsoft Office "Claude for Office" 
+(Add-in officiel d'Anthropic) directement à une instance LOCALE d'Antigravity, 
+sans utiliser de clé API payante d'Anthropic.
+Pour cela, nous avons reverse-engineeré l'API Anthropic avec une 
+passerelle locale (Gateway IPC).
+
+2. L'ARCHITECTURE IPC (Inter-Process Communication)
+---------------------------------------------------
+Le système est composé de 3 pièces :
+A. `gateway_ipc.py` : Un serveur FastAPI tournant sur le port 8000. 
+   Il simule l'API Anthropic. Quand Office lui envoie une requête, il extrait le
+   prompt de l'utilisateur, le contexte Office, et la liste des Outils Office.
+   Il écrit tout ça dans un fichier `requests.jsonl` et attend (pendant max 120s) 
+   qu'un fichier apparaisse dans le dossier `responses/`.
+
+B. `poll.py` : Un petit script python qui lit `requests.jsonl`. S'il y a 
+   une nouvelle ligne, il s'arrête en l'imprimant. Il sert de "réveil" pour le sous-agent.
+
+C. Le Sous-Agent Antigravity (défini dans SKILL.md) : 
+   - Quand l'utilisateur tape `/office-agent`, on lance un sous-agent "office_backend".
+   - Il lance le serveur Gateway en mode Daemon (tâche de fond).
+   - Il lance `poll.py`.
+   - Dès que `poll.py` trouve une requête, il réveille l'agent.
+   - L'agent lit la question, réfléchit, et crée le fichier `responses/<id>.json`.
+   - L'agent relance `poll.py` pour attendre la suite.
+
+3. LES OUTILS OFFICE (Le cœur de la magie)
+------------------------------------------
+Le complément Claude injecte dynamiquement des outils selon le logiciel ouvert (Excel, Word, PPT).
+La passerelle extrait la définition de ces outils du JSON et les injecte dans le prompt du sous-agent.
+Règle d'or : L'agent DOIT répondre avec ce format strict pour appeler un outil :
+{"tool": "nom_de_l_outil", "param_requis": "valeur"}
+(La passerelle se charge de transformer ce JSON en SSE pour le stream de l'Add-in).
+L'outil le plus puissant est `execute_office_js` qui permet de coder des macros asynchrones en JS !
+
+4. LA STRATÉGIE HYBRIDE POWERPOINT
+----------------------------------
+PowerPoint a posé un défi spécifique. L'outil natif de l'Add-in générait les slides 
+une par une (Agentic Loop), prenant 2 minutes pour 5 slides. De plus, `win32com` créait
+des fenêtres fantômes en arrière-plan.
+Nous avons donc implémenté une STRATÉGIE HYBRIDE stricte dans le système prompt (SKILL.md) :
+- CRÉATION MASSIVE (ex: "Fais 10 slides") : L'agent utilise `run_command` et un script Python avec `python-pptx` pour générer un fichier complet sur le bureau.
+- MODIFICATION PRÉCISE (ex: "Change ce titre") : L'agent utilise l'outil natif `execute_office_js` ou `edit_slide_text` fourni dans le prompt de la passerelle pour modifier la slide actuelle en direct.
+
+5. L'INSTALLATEUR (`install_office_agent.py`)
+---------------------------------------------
+C'est le fichier maître. Quand on le lance :
+- Il installe les dépendances : fastapi, uvicorn, python-pptx, pandas.
+- Il copie `gateway_ipc.py` et `poll.py` dans le scratch directory de l'agent.
+- Il génère dynamiquement le fichier `SKILL.md` avec le bon chemin `workspace` et le copie dans le dossier des skills d'Antigravity.
+- Plus aucun fichier .bat n'est nécessaire sur le bureau ! 
+
+====================================================================
+INSTRUCTION POUR L'IA FUTURE :
+Maintenant que tu as lu ce contexte, tu comprends comment la passerelle 
+et le sous-agent communiquent via des fichiers JSON. Tu peux modifier 
+`install_office_agent.py` pour ajouter de nouvelles fonctionnalités 
+(comme Pandas pour Excel) en toute sécurité !
+====================================================================
